@@ -28,6 +28,8 @@ class LauncherApp:
 
         self.entries: list[AppEntry] = []
         self.vars: dict[str, tk.BooleanVar] = {}
+        self.row_widgets: dict[str, ttk.Frame] = {}
+        self.empty_label: ttk.Label | None = None
         self.current_shown: list[AppEntry] = []
         self.selected_panel_entries: list[AppEntry] = []
         self.filter_var = tk.StringVar()
@@ -35,6 +37,9 @@ class LauncherApp:
         self.status_var = tk.StringVar(value="正在扫描本地应用…")
         self.scan_generation = 0
         self.scan_queue: queue.Queue[tuple[str, object]] | None = None
+        self._rebuild_job: str | None = None
+        self._save_job: str | None = None
+        self._last_query: str | None = None
 
         self._build_ui()
         self._bind_events()
@@ -146,9 +151,30 @@ class LauncherApp:
         self.launch_profile_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
     def _bind_events(self) -> None:
-        self.filter_var.trace_add("write", lambda *_: self.rebuild_list())
+        self.filter_var.trace_add("write", lambda *_: self.schedule_rebuild_list())
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def schedule_rebuild_list(self) -> None:
+        if self._rebuild_job is not None:
+            self.root.after_cancel(self._rebuild_job)
+        self._rebuild_job = self.root.after(180, self._run_rebuild_list)
+
+    def _run_rebuild_list(self) -> None:
+        self._rebuild_job = None
+        query = self.filter_var.get().strip().lower()
+        if query == self._last_query:
+            return
+        self.rebuild_list()
+
+    def schedule_save_selection(self) -> None:
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+        self._save_job = self.root.after(450, self._run_save_selection)
+
+    def _run_save_selection(self) -> None:
+        self._save_job = None
+        self.save_selection()
 
     def _on_list_inner_configure(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -287,6 +313,9 @@ class LauncherApp:
         self.status_var.set("正在扫描本地应用…")
         for child in self.list_inner.winfo_children():
             child.destroy()
+        self.row_widgets = {}
+        self.empty_label = None
+        self.current_shown = []
         self.launch_button.configure(state="disabled")
         self.launch_profile_button.configure(state="disabled")
         self.scan_generation += 1
@@ -329,6 +358,7 @@ class LauncherApp:
         for entry in entries:
             self.vars[entry.target] = tk.BooleanVar(value=False)
 
+        self._create_rows()
         self.refresh_profile_values()
         missing = self.apply_profile(self.config.active_profile, save=False)
         self.rebuild_list()
@@ -341,11 +371,41 @@ class LauncherApp:
         else:
             self.status_var.set(f"已找到 {len(entries)} 个应用，当前存档：{name}")
 
-    def rebuild_list(self) -> None:
+    def _create_rows(self) -> None:
         for child in self.list_inner.winfo_children():
             child.destroy()
 
+        self.row_widgets = {}
+        for entry in self.entries:
+            var = self.vars.get(entry.target)
+            if var is None:
+                var = tk.BooleanVar(value=False)
+                self.vars[entry.target] = var
+
+            row = ttk.Frame(self.list_inner, padding=(0, 4))
+            ttk.Checkbutton(row, text=entry.name, variable=var, command=self.on_toggle).pack(anchor="w")
+            ttk.Label(
+                row,
+                text=f"{entry.category} · {entry.target}",
+                foreground="#777777",
+                font=("Microsoft YaHei UI", 8),
+            ).pack(anchor="w", padx=(22, 0))
+            self.row_widgets[entry.target] = row
+
+        self.empty_label = ttk.Label(
+            self.list_inner,
+            text="没有匹配的应用，可点击右上角“重新扫描”。",
+            foreground="#888888",
+        )
+
+    def rebuild_list(self) -> None:
+        for row in self.row_widgets.values():
+            row.pack_forget()
+        if self.empty_label is not None:
+            self.empty_label.pack_forget()
+
         query = self.filter_var.get().strip().lower()
+        self._last_query = query
         self.current_shown = [
             entry
             for entry in self.entries
@@ -356,57 +416,38 @@ class LauncherApp:
         ]
 
         for entry in self.current_shown:
-            self._add_app_row(entry)
+            row = self.row_widgets.get(entry.target)
+            if row is not None:
+                row.pack(fill="x", anchor="w")
 
-        if not self.current_shown:
-            ttk.Label(
-                self.list_inner,
-                text="没有匹配的应用，可点击右上角“重新扫描”。",
-                foreground="#888888",
-            ).pack(anchor="w", pady=12)
+        if not self.current_shown and self.empty_label is not None:
+            self.empty_label.pack(anchor="w", pady=12)
 
-        self.update_count()
-
-    def _add_app_row(self, entry: AppEntry) -> None:
-        var = self.vars.get(entry.target)
-        if var is None:
-            var = tk.BooleanVar(value=False)
-            self.vars[entry.target] = var
-
-        row = ttk.Frame(self.list_inner, padding=(0, 4))
-        row.pack(fill="x", anchor="w")
-
-        cb = ttk.Checkbutton(row, text=entry.name, variable=var, command=self.on_toggle)
-        cb.pack(anchor="w")
-
-        detail = ttk.Label(
-            row,
-            text=f"{entry.category} · {entry.target}",
-            foreground="#777777",
-            font=("Microsoft YaHei UI", 8),
-        )
-        detail.pack(anchor="w", padx=(22, 0))
+        self.update_count_label()
 
     def on_toggle(self) -> None:
         self.update_count()
-        self.save_selection()
+        self.schedule_save_selection()
 
     def select_shown(self) -> None:
         for entry in self.current_shown:
             self.vars[entry.target].set(True)
         self.update_count()
-        self.save_selection()
+        self.schedule_save_selection()
 
     def clear_all(self) -> None:
         for var in self.vars.values():
             var.set(False)
         self.update_count()
-        self.save_selection()
+        self.schedule_save_selection()
 
     def update_count(self) -> None:
+        self.update_count_label()
+        self.refresh_selected_panel()
+
+    def update_count_label(self) -> None:
         count = sum(1 for var in self.vars.values() if var.get())
         self.count_var.set(f"已选 {count} 个")
-        self.refresh_selected_panel()
 
     def refresh_selected_panel(self) -> None:
         if not hasattr(self, "selected_listbox"):
@@ -430,7 +471,7 @@ class LauncherApp:
                 if var is not None:
                     var.set(False)
         self.update_count()
-        self.save_selection()
+        self.schedule_save_selection()
 
     def current_selected_targets(self) -> list[str]:
         return [target for target, var in self.vars.items() if var.get()]
@@ -510,6 +551,9 @@ class LauncherApp:
             raise OSError(f"ShellExecuteW 返回错误码 {result}")
 
     def on_close(self) -> None:
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+            self._save_job = None
         self.save_selection()
         self.root.destroy()
 
