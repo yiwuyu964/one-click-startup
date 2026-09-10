@@ -20,8 +20,8 @@ class LauncherApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("820x660")
-        self.root.minsize(600, 480)
+        self.root.geometry("1000x680")
+        self.root.minsize(760, 520)
 
         self.config = Config(CONFIG_PATH)
         self.config.load()
@@ -29,6 +29,7 @@ class LauncherApp:
         self.entries: list[AppEntry] = []
         self.vars: dict[str, tk.BooleanVar] = {}
         self.current_shown: list[AppEntry] = []
+        self.selected_panel_entries: list[AppEntry] = []
         self.filter_var = tk.StringVar()
         self.profile_var = tk.StringVar()
         self.status_var = tk.StringVar(value="正在扫描本地应用…")
@@ -84,8 +85,13 @@ class LauncherApp:
         self.count_var = tk.StringVar(value="已选 0 个")
         ttk.Label(toolbar, textvariable=self.count_var).pack(side="right")
 
-        list_frame = ttk.Frame(self.root, padding=(12, 0, 12, 0))
-        list_frame.grid(row=2, column=0, sticky="nsew")
+        body = ttk.Frame(self.root)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(body, padding=(12, 0, 6, 0))
+        list_frame.grid(row=0, column=0, sticky="nsew")
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
@@ -99,6 +105,32 @@ class LauncherApp:
         self.canvas_window = self.canvas.create_window((0, 0), window=self.list_inner, anchor="nw")
         self.list_inner.bind("<Configure>", self._on_list_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        selected_panel = ttk.LabelFrame(body, text="已选应用", padding=(8, 6, 8, 6))
+        selected_panel.grid(row=0, column=1, sticky="ns", padx=(0, 12))
+        selected_panel.rowconfigure(0, weight=1)
+        selected_panel.columnconfigure(0, weight=1)
+
+        self.selected_listbox = tk.Listbox(
+            selected_panel,
+            selectmode=tk.EXTENDED,
+            activestyle="none",
+            width=26,
+            exportselection=False,
+        )
+        self.selected_listbox.grid(row=0, column=0, sticky="nsew")
+        selected_scrollbar = ttk.Scrollbar(
+            selected_panel,
+            orient="vertical",
+            command=self.selected_listbox.yview,
+        )
+        selected_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.selected_listbox.configure(yscrollcommand=selected_scrollbar.set)
+        ttk.Button(
+            selected_panel,
+            text="取消勾选选中项",
+            command=self.remove_selected_from_panel,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         footer = ttk.Frame(self.root, padding=(12, 8, 12, 12))
         footer.grid(row=4, column=0, sticky="ew")
@@ -374,6 +406,31 @@ class LauncherApp:
     def update_count(self) -> None:
         count = sum(1 for var in self.vars.values() if var.get())
         self.count_var.set(f"已选 {count} 个")
+        self.refresh_selected_panel()
+
+    def refresh_selected_panel(self) -> None:
+        if not hasattr(self, "selected_listbox"):
+            return
+        self.selected_listbox.delete(0, tk.END)
+        self.selected_panel_entries = []
+        for entry in self.entries:
+            var = self.vars.get(entry.target)
+            if var is not None and var.get():
+                self.selected_listbox.insert(tk.END, entry.name)
+                self.selected_panel_entries.append(entry)
+
+    def remove_selected_from_panel(self) -> None:
+        indices = list(self.selected_listbox.curselection())
+        if not indices:
+            return
+        for index in indices:
+            if 0 <= index < len(self.selected_panel_entries):
+                entry = self.selected_panel_entries[index]
+                var = self.vars.get(entry.target)
+                if var is not None:
+                    var.set(False)
+        self.update_count()
+        self.save_selection()
 
     def current_selected_targets(self) -> list[str]:
         return [target for target, var in self.vars.items() if var.get()]
