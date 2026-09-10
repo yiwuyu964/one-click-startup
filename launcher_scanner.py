@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import glob
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - non-Windows fallback
+    winreg = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,145 @@ def _is_noise_entry(name: str, target: str) -> bool:
     return any(token in target_dir for token in noise_dirs)
 
 
+def _unescape_vdf(value: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            next_char = value[index + 1]
+            if next_char == "\\":
+                result.append("\\")
+                index += 2
+                continue
+            if next_char == '"':
+                result.append('"')
+                index += 2
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _dedupe_paths(paths: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path:
+            continue
+        normalized = os.path.normpath(path)
+        key = normalized.lower()
+        if key in seen or not os.path.isdir(normalized):
+            continue
+        seen.add(key)
+        result.append(normalized)
+    return result
+
+
+def _steam_install_paths() -> list[str]:
+    candidates: list[str] = []
+    if winreg is not None:
+        checks = (
+            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+        )
+        for root, subkey, value_name in checks:
+            try:
+                with winreg.OpenKey(root, subkey) as key:
+                    value, _ = winreg.QueryValueEx(key, value_name)
+            except OSError:
+                continue
+            if isinstance(value, str) and value:
+                candidates.append(value)
+
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(os.path.join(base, "Steam"))
+
+    return _dedupe_paths(candidates)
+
+
+def _find_steam_libraries(steam_path: str) -> list[str]:
+    libraries = [steam_path]
+    vdf_path = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
+    if os.path.isfile(vdf_path):
+        try:
+            with open(vdf_path, "r", encoding="utf-8-sig", errors="replace") as file:
+                text = file.read()
+        except OSError:
+            text = ""
+
+        patterns = (
+            r'"path"\s+"((?:[^"\\]|\\.)*)"',
+            r'"\d+"\s+"([A-Za-z]:\\\\(?:[^"\\]|\\.)*)"',
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                libraries.append(_unescape_vdf(match.group(1)))
+
+    return _dedupe_paths(libraries)
+
+
+def _scan_steam_games() -> list[AppEntry]:
+    entries: list[AppEntry] = []
+    libraries: list[str] = []
+    for steam_path in _steam_install_paths():
+        for library in _find_steam_libraries(steam_path):
+            key = library.lower()
+            if key not in {item.lower() for item in libraries}:
+                libraries.append(library)
+
+    ignored_names = {
+        "steamworks common redistributables",
+        "proton",
+        "steam linux runtime",
+        "steamvr",
+        "steamvr performance test",
+    }
+
+    for library in libraries:
+        steamapps = os.path.join(library, "steamapps")
+        if not os.path.isdir(steamapps):
+            continue
+
+        for manifest in glob.glob(os.path.join(steamapps, "appmanifest_*.acf")):
+            try:
+                with open(manifest, "r", encoding="utf-8-sig", errors="replace") as file:
+                    text = file.read()
+            except OSError:
+                continue
+
+            appid_match = re.search(r'"appid"\s+"(\d+)"', text)
+            name_match = re.search(r'"name"\s+"((?:[^"\\]|\\.)*)"', text)
+            installdir_match = re.search(r'"installdir"\s+"((?:[^"\\]|\\.)*)"', text)
+            if not appid_match or not name_match:
+                continue
+
+            appid = appid_match.group(1)
+            name = _unescape_vdf(name_match.group(1))
+            if not name or name.lower() in ignored_names:
+                continue
+
+            installdir = _unescape_vdf(installdir_match.group(1)) if installdir_match else ""
+            if installdir:
+                install_path = os.path.join(steamapps, "common", installdir)
+                if not os.path.isdir(install_path):
+                    continue
+
+            entries.append(
+                AppEntry(
+                    name=name,
+                    target=f"steam://rungameid/{appid}",
+                    source=manifest,
+                    category="Steam",
+                )
+            )
+
+    return entries
+
+
 def scan_apps() -> list[AppEntry]:
     roots = _start_menu_roots()
     shortcut_rows: list[tuple[str, str, str]] = []
@@ -245,6 +391,12 @@ def scan_apps() -> list[AppEntry]:
                 working_dir=info.working_dir,
             )
         )
+
+    for entry in _scan_steam_games():
+        if entry.target.lower() in seen:
+            continue
+        seen.add(entry.target.lower())
+        entries.append(entry)
 
     entries.sort(key=lambda item: (item.name.lower(), item.target.lower()))
     return entries
