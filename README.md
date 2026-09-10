@@ -14,6 +14,7 @@ python app.py
 
 - 自动扫描本地应用快捷方式
 - 支持扫描 Steam 已安装游戏（读取 Steam 库和 appmanifest）
+- 支持扫描微软商店 / UWP 应用（通过 Get-StartApps）
 - 支持搜索过滤
 - 勾选后一键启动多个应用
 - 支持多个存档：新建、重命名、删除

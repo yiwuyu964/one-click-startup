@@ -13,6 +13,9 @@ except ImportError:  # pragma: no cover - non-Windows fallback
     winreg = None  # type: ignore[assignment]
 
 
+UWP_APP_ID_PATTERN = re.compile(r"^[^!]+_[a-z0-9]{13}!.+$", re.IGNORECASE)
+
+
 @dataclass(frozen=True)
 class AppEntry:
     name: str
@@ -357,6 +360,87 @@ def _scan_steam_games() -> list[AppEntry]:
     return entries
 
 
+def _scan_store_apps() -> list[AppEntry]:
+    script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if (-not (Get-Command Get-StartApps -ErrorAction SilentlyContinue)) {
+    Write-Output '[]'
+    exit
+}
+$items = @()
+foreach ($app in Get-StartApps) {
+    if ($app.Name -and $app.AppID) {
+        $items += [PSCustomObject]@{
+            Name = [string]$app.Name
+            AppID = [string]$app.AppID
+        }
+    }
+}
+$items | ConvertTo-Json -Compress
+'''
+
+    try:
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    if proc.returncode != 0:
+        return []
+
+    raw = proc.stdout.strip()
+    if not raw or raw in {"null", "{}"}:
+        return []
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    items = data if isinstance(data, list) else [data]
+    entries: list[AppEntry] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Name") or "").strip()
+        app_id = str(item.get("AppID") or "").strip()
+        if not name or not app_id or not UWP_APP_ID_PATTERN.match(app_id):
+            continue
+
+        target = f"shell:AppsFolder\\{app_id}"
+        key = target.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            AppEntry(
+                name=name,
+                target=target,
+                source="Get-StartApps",
+                category="微软商店",
+            )
+        )
+
+    return entries
+
+
 def scan_apps() -> list[AppEntry]:
     roots = _start_menu_roots()
     shortcut_rows: list[tuple[str, str, str]] = []
@@ -393,6 +477,12 @@ def scan_apps() -> list[AppEntry]:
         )
 
     for entry in _scan_steam_games():
+        if entry.target.lower() in seen:
+            continue
+        seen.add(entry.target.lower())
+        entries.append(entry)
+
+    for entry in _scan_store_apps():
         if entry.target.lower() in seen:
             continue
         seen.add(entry.target.lower())

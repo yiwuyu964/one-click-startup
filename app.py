@@ -436,14 +436,19 @@ class LauncherApp:
             ctypes.c_int,
         ]
         shell32.ShellExecuteW.restype = ctypes.c_void_p
-        result = shell32.ShellExecuteW(
-            None,
-            "open",
-            entry.target,
-            entry.arguments or None,
-            entry.working_dir or None,
-            1,
-        )
+
+        if entry.target.lower().startswith("shell:appsfolder\\"):
+            explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+            result = shell32.ShellExecuteW(None, "open", explorer, entry.target, None, 1)
+        else:
+            result = shell32.ShellExecuteW(
+                None,
+                "open",
+                entry.target,
+                entry.arguments or None,
+                entry.working_dir or None,
+                1,
+            )
         if result is None or int(result) <= 32:
             raise OSError(f"ShellExecuteW 返回错误码 {result}")
 
